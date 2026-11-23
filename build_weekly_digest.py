@@ -1,13 +1,14 @@
 import datetime as dt
 import json
 import re
+import time
 from typing import Literal
 
 import feedparser
 from dateutil import parser as date_parser
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -40,6 +41,7 @@ FEEDS: dict[str, list[str]] = {
 
 MAX_ITEMS_PER_REGION = 45
 DAYS_WINDOW = 7
+MODELS_TO_TRY = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
 
 
 class NewsItem(BaseModel):
@@ -153,6 +155,50 @@ def build_prompt(now_utc: dt.datetime, start_dt: dt.datetime, payload_by_region:
 """.strip()
 
 
+def call_with_fallback(client: genai.Client, prompt: str) -> WeeklyDigest:
+    last_exc: Exception | None = None
+    # При пиковой нагрузке или квоте делаем повторные попытки и переключаемся на резервную модель
+    for model_name in MODELS_TO_TRY:
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=WeeklyDigest,
+                        temperature=0.2,
+                    ),
+                )
+                return WeeklyDigest.model_validate_json(response.text)
+            except errors.APIError as exc:
+                last_exc = exc
+                if exc.code in (429, 500, 503, 504):
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                raise
+    raise RuntimeError(f"Не удалось получить ответ от API: {last_exc}")
+
+
+def filter_valid_sources(digest: WeeklyDigest, raw_by_region: dict[str, list[dict]]) -> WeeklyDigest:
+    allowed_links = {
+        item["link"]
+        for items in raw_by_region.values()
+        for item in items
+        if item.get("link")
+    }
+    # Оставляем только те URL, которые реально пришли из RSS-лент на текущем запуске
+    for region_items in (
+        digest.regions.RU,
+        digest.regions.EU,
+        digest.regions.US,
+        digest.regions.CN,
+    ):
+        for card in region_items:
+            card.sources = [url for url in card.sources if url in allowed_links]
+    return digest
+
+
 def generate_digest(output_path: str = "weekly_digest.json") -> None:
     now_utc = dt.datetime.now(dt.timezone.utc)
     cutoff = now_utc - dt.timedelta(days=DAYS_WINDOW)
@@ -164,18 +210,9 @@ def generate_digest(output_path: str = "weekly_digest.json") -> None:
 
     client = genai.Client()
     prompt = build_prompt(now_utc, cutoff, raw_by_region)
+    digest = call_with_fallback(client, prompt)
+    digest = filter_valid_sources(digest, raw_by_region)
 
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=WeeklyDigest,
-            temperature=0.2,
-        ),
-    )
-
-    digest = WeeklyDigest.model_validate_json(response.text)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(digest.model_dump_json(indent=2))
 

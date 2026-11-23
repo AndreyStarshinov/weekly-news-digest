@@ -1,0 +1,48 @@
+name: Build Weekly Digest
+
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Каждый понедельник в 04:00 UTC (07:00 МСК)
+  workflow_dispatch: # Ручной запуск из вкладки Actions
+
+permissions:
+  contents: write
+
+jobs:
+  build-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install feedparser python-dateutil pydantic google-genai python-dotenv
+
+      - name: Run weekly digest generator
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python build_weekly_digest.py
+
+      - name: Archive weekly snapshot
+        run: |
+          mkdir -p history
+          WEEK_ID=$(python -c "import json; print(json.load(open('weekly_digest.json', encoding='utf-8'))['week_id'])")
+          cp weekly_digest.json "history/${WEEK_ID}.json"
+
+      - name: Commit and push updated digest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add weekly_digest.json history/
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update weekly news digest"
+            git push
+          fi

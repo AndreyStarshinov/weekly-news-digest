@@ -41,7 +41,7 @@ FEEDS: dict[str, list[str]] = {
 
 MAX_ITEMS_PER_REGION = 45
 DAYS_WINDOW = 7
-MODELS_TO_TRY = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+MODELS_TO_TRY = ["gemini-3.8-flash"]
 
 
 class NewsItem(BaseModel):
@@ -159,7 +159,7 @@ def call_with_fallback(client: genai.Client, prompt: str) -> WeeklyDigest:
     last_exc: Exception | None = None
     # При пиковой нагрузке или квоте делаем повторные попытки и переключаемся на резервную модель
     for model_name in MODELS_TO_TRY:
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 response = client.models.generate_content(
                     model=model_name,
